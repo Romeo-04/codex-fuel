@@ -1,0 +1,74 @@
+{
+  "name": "codex-usage-dashboard",
+  "displayName": "Codex Usage Dashboard",
+  "description": "Local monthly and 5-hour window usage visualization for Codex.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:codexUsageDashboard.open",
+    "onCommand:codexUsageDashboard.addUsage",
+    "onCommand:codexUsageDashboard.setLimits",
+    "onCommand:codexUsageDashboard.resetWindow",
+    "onCommand:codexUsageDashboard.resetMonth"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexUsageDashboard.open",
+        "title": "Codex Usage: Open Dashboard",
+        "category": "Codex Usage"
+      },
+      {
+        "command": "codexUsageDashboard.addUsage",
+        "title": "Codex Usage: Add Usage",
+        "category": "Codex Usage"
+      },
+      {
+        "command": "codexUsageDashboard.setLimits",
+        "title": "Codex Usage: Set Limits",
+        "category": "Codex Usage"
+      },
+      {
+        "command": "codexUsageDashboard.resetWindow",
+        "title": "Codex Usage: Reset 5-Hour Window",
+        "category": "Codex Usage"
+      },
+      {
+        "command": "codexUsageDashboard.resetMonth",
+        "title": "Codex Usage: Reset Monthly Usage",
+        "category": "Codex Usage"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Usage Dashboard",
+      "properties": {
+        "codexUsageDashboard.defaultMonthlyLimit": {
+          "type": "number",
+          "default": 100,
+          "minimum": 0,
+          "description": "Default monthly usage limit for the local Codex usage dashboard."
+        },
+        "codexUsageDashboard.defaultFiveHourLimit": {
+          "type": "number",
+          "default": 25,
+          "minimum": 0,
+          "description": "Default 5-hour usage limit for the local Codex usage dashboard."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package --no-dependencies",
+    "lint": "node --check src/extension.js"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0"
+  }
+}
