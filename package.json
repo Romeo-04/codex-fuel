@@ -2,7 +2,7 @@
   "name": "codex-usage-dashboard",
   "displayName": "Codex Usage Dashboard",
   "description": "Local monthly and 5-hour window usage visualization for Codex.",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.92.0"
@@ -79,6 +79,57 @@
           "default": 25,
           "minimum": 0,
           "description": "Default 5-hour usage limit for the local Codex usage dashboard."
+        },
+        "codexUsageDashboard.autoReadCodexSessions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically read Codex rate-limit snapshots from local session rollout files under CODEX_HOME/sessions. This does not read auth tokens."
+        },
+        "codexUsageDashboard.dataSource": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "sessionFiles",
+            "endpoint",
+            "manual"
+          ],
+          "enumDescriptions": [
+            "Try the authenticated endpoint when enabled, then session files, then manual counters.",
+            "Read local Codex session rollout files only.",
+            "Use the authenticated usage endpoint only. Requires experimentalReadAuthJson.",
+            "Use local manual counters only."
+          ],
+          "description": "Usage data source for the dashboard."
+        },
+        "codexUsageDashboard.experimentalReadAuthJson": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to read CODEX_HOME/auth.json and call ChatGPT's usage endpoint. This is undocumented and may break. Tokens are not logged or stored by this extension."
+        },
+        "codexUsageDashboard.usageEndpointUrl": {
+          "type": "string",
+          "default": "https://chatgpt.com/backend-api/wham/usage",
+          "description": "Experimental authenticated Codex usage endpoint. Only used when endpoint mode is enabled."
+        },
+        "codexUsageDashboard.refreshIntervalSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 30,
+          "maximum": 3600,
+          "description": "Auto-refresh interval for the dashboard data sources."
+        },
+        "codexUsageDashboard.codexHome": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Codex home directory override. Leave empty to use CODEX_HOME or ~/.codex."
+        },
+        "codexUsageDashboard.lookbackDays": {
+          "type": "number",
+          "default": 14,
+          "minimum": 1,
+          "maximum": 90,
+          "description": "Number of recent days to scan for Codex rollout files."
         }
       }
     }

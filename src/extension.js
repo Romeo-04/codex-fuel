@@ -1,11 +1,17 @@
 const vscode = require('vscode');
+const fs = require('fs');
+const https = require('https');
+const os = require('os');
+const path = require('path');
 
 const STATE_KEY = 'codexUsageDashboard.state';
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 const MAX_ENTRIES = 120;
+const DEFAULT_LOOKBACK_DAYS = 14;
 
 let activePanel;
 let sidebarView;
+let refreshTimer;
 
 function activate(context) {
   const provider = new UsageSidebarProvider(context);
@@ -22,9 +28,33 @@ function activate(context) {
     vscode.commands.registerCommand('codexUsageDashboard.resetWindow', () => resetWindow(context)),
     vscode.commands.registerCommand('codexUsageDashboard.resetMonth', () => resetMonth(context))
   );
+
+  scheduleRefreshTimer(context);
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration('codexUsageDashboard.refreshIntervalSeconds')) {
+      scheduleRefreshTimer(context);
+    }
+  }));
 }
 
-function deactivate() {}
+function deactivate() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = undefined;
+  }
+}
+
+function scheduleRefreshTimer(context) {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+  }
+
+  const config = vscode.workspace.getConfiguration('codexUsageDashboard');
+  const seconds = Math.max(30, Math.min(3600, Number(config.get('refreshIntervalSeconds', 300)) || 300));
+  refreshTimer = setInterval(() => {
+    refreshViews(context);
+  }, seconds * 1000);
+}
 
 class UsageSidebarProvider {
   constructor(context) {
@@ -105,10 +135,31 @@ async function handleWebviewMessage(context, message) {
     case 'resetMonth':
       await resetMonth(context);
       break;
+    case 'enableEndpoint':
+      await promptEnableEndpoint(context);
+      break;
     case 'refresh':
       refreshViews(context);
       break;
   }
+}
+
+async function promptEnableEndpoint(context) {
+  const choice = await vscode.window.showWarningMessage(
+    'Enable authenticated Codex usage endpoint? This reads CODEX_HOME/auth.json to extract a bearer token and sends it only to https://chatgpt.com/backend-api/wham/usage. The endpoint is undocumented and may break.',
+    { modal: true },
+    'Enable'
+  );
+
+  if (choice !== 'Enable') {
+    return;
+  }
+
+  const config = vscode.workspace.getConfiguration('codexUsageDashboard');
+  await config.update('experimentalReadAuthJson', true, vscode.ConfigurationTarget.Global);
+  await config.update('dataSource', 'auto', vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage('Codex usage endpoint enabled for this VS Code profile.');
+  refreshViews(context);
 }
 
 async function promptAddUsage(context) {
@@ -202,23 +253,24 @@ async function resetMonth(context) {
   refreshViews(context);
 }
 
-function refreshViews(context) {
+async function refreshViews(context) {
   if (!activePanel && !sidebarView) {
     return;
   }
 
   const state = normalizeState(context);
   const didRoll = rollExpiredPeriods(state);
+  const codexSnapshot = await readUsageSnapshot(context);
   if (didRoll) {
     saveState(context, state);
   }
 
   if (activePanel) {
-    activePanel.webview.html = renderDashboard(activePanel.webview, state, 'panel');
+    activePanel.webview.html = renderDashboard(activePanel.webview, state, codexSnapshot, 'panel');
   }
 
   if (sidebarView) {
-    sidebarView.webview.html = renderDashboard(sidebarView.webview, state, 'sidebar');
+    sidebarView.webview.html = renderDashboard(sidebarView.webview, state, codexSnapshot, 'sidebar');
   }
 }
 
@@ -244,6 +296,443 @@ function normalizeState(context) {
   if (state.windowUsed < 0) state.windowUsed = 0;
 
   return state;
+}
+
+async function readUsageSnapshot(context) {
+  const config = vscode.workspace.getConfiguration('codexUsageDashboard');
+  const dataSource = String(config.get('dataSource', 'auto'));
+
+  if (dataSource === 'manual') {
+    return undefined;
+  }
+
+  if (dataSource === 'endpoint') {
+    return readEndpointUsageSnapshot(context);
+  }
+
+  if (dataSource === 'sessionFiles') {
+    return readCodexUsageSnapshot(context);
+  }
+
+  if (config.get('experimentalReadAuthJson', false) === true) {
+    const endpointSnapshot = await readEndpointUsageSnapshot(context);
+    if (endpointSnapshot && Array.isArray(endpointSnapshot.windows) && endpointSnapshot.windows.length > 0) {
+      return endpointSnapshot;
+    }
+  }
+
+  return readCodexUsageSnapshot(context);
+}
+
+function readCodexUsageSnapshot(context) {
+  const config = vscode.workspace.getConfiguration('codexUsageDashboard');
+  if (config.get('autoReadCodexSessions', true) !== true) {
+    return undefined;
+  }
+
+  const codexHome = getCodexHome(config);
+  const sessionsDir = path.join(codexHome, 'sessions');
+  const lookbackDays = Math.max(1, Math.min(90, Number(config.get('lookbackDays', DEFAULT_LOOKBACK_DAYS)) || DEFAULT_LOOKBACK_DAYS));
+
+  try {
+    const files = getRecentRolloutFiles(sessionsDir, lookbackDays);
+    for (const file of files) {
+      const rateLimits = findLatestRateLimits(file.fullPath);
+      const snapshot = normalizeRateLimits(rateLimits, file.fullPath);
+      if (snapshot) {
+        return snapshot;
+      }
+    }
+  } catch {
+    return {
+      error: `Could not read Codex sessions at ${sessionsDir}`,
+      source: sessionsDir
+    };
+  }
+
+  return {
+    error: `No Codex rate-limit snapshot found in the last ${lookbackDays} day${lookbackDays === 1 ? '' : 's'}.`,
+    source: sessionsDir
+  };
+}
+
+async function readEndpointUsageSnapshot(context) {
+  const config = vscode.workspace.getConfiguration('codexUsageDashboard');
+  if (config.get('experimentalReadAuthJson', false) !== true) {
+    return {
+      error: 'Endpoint mode requires codexUsageDashboard.experimentalReadAuthJson to be enabled.',
+      source: 'auth disabled'
+    };
+  }
+
+  const endpointUrl = String(config.get('usageEndpointUrl', 'https://chatgpt.com/backend-api/wham/usage') || '').trim();
+  if (!isAllowedUsageEndpoint(endpointUrl)) {
+    return {
+      error: 'Usage endpoint must use https://chatgpt.com/.',
+      source: 'endpoint blocked'
+    };
+  }
+
+  const auth = readCodexAuth(context);
+  if (!auth.accessToken) {
+    return {
+      error: auth.error || 'No usable Codex access token found.',
+      source: auth.source || 'auth.json'
+    };
+  }
+
+  try {
+    const response = await httpsGetJson(endpointUrl, {
+      Authorization: `Bearer ${auth.accessToken}`,
+      Accept: 'application/json',
+      Origin: 'https://chatgpt.com',
+      Referer: 'https://chatgpt.com/'
+    });
+    const snapshot = normalizeEndpointUsageResponse(response.body, endpointUrl);
+    if (snapshot) {
+      return snapshot;
+    }
+
+    return {
+      error: `Endpoint returned HTTP ${response.statusCode}, but no rate-limit windows were found.`,
+      source: endpointUrl
+    };
+  } catch (error) {
+    return {
+      error: `Endpoint request failed: ${sanitizeError(error)}`,
+      source: endpointUrl
+    };
+  }
+}
+
+function isAllowedUsageEndpoint(endpointUrl) {
+  try {
+    const parsed = new URL(endpointUrl);
+    return parsed.protocol === 'https:' && parsed.hostname === 'chatgpt.com';
+  } catch {
+    return false;
+  }
+}
+
+function readCodexAuth(context) {
+  const config = vscode.workspace.getConfiguration('codexUsageDashboard');
+  const codexHome = getCodexHome(config);
+  const authPath = path.join(codexHome, 'auth.json');
+
+  try {
+    const raw = fs.readFileSync(authPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const accessToken = findAccessToken(parsed);
+    return {
+      accessToken,
+      source: authPath,
+      error: accessToken ? undefined : 'auth.json exists, but no access token field matched known Codex shapes.'
+    };
+  } catch {
+    return {
+      accessToken: '',
+      source: authPath,
+      error: `Could not read Codex auth file at ${authPath}.`
+    };
+  }
+}
+
+function findAccessToken(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8) {
+    return '';
+  }
+
+  for (const key of ['access_token', 'accessToken', 'id_token', 'token']) {
+    if (typeof value[key] === 'string' && value[key].length > 20) {
+      return value[key];
+    }
+  }
+
+  for (const child of Object.values(value)) {
+    const token = findAccessToken(child, depth + 1);
+    if (token) {
+      return token;
+    }
+  }
+
+  return '';
+}
+
+function httpsGetJson(endpointUrl, headers) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(endpointUrl, { headers }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        try {
+          resolve({
+            statusCode: response.statusCode || 0,
+            body: text ? JSON.parse(text) : {}
+          });
+        } catch {
+          reject(new Error(`HTTP ${response.statusCode || 0} returned non-JSON data`));
+        }
+      });
+    });
+
+    request.setTimeout(15000, () => {
+      request.destroy(new Error('request timed out'));
+    });
+    request.on('error', reject);
+  });
+}
+
+function normalizeEndpointUsageResponse(body, sourceUrl) {
+  const candidates = findRateLimitCandidates(body);
+  for (const candidate of candidates) {
+    const snapshot = normalizeRateLimits(candidate, sourceUrl);
+    if (snapshot) {
+      snapshot.sourceFile = sourceUrl;
+      snapshot.fromEndpoint = true;
+      return snapshot;
+    }
+  }
+
+  return undefined;
+}
+
+function findRateLimitCandidates(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 10) {
+    return [];
+  }
+
+  const candidates = [];
+  if (value.rate_limits && typeof value.rate_limits === 'object') {
+    candidates.push(value.rate_limits);
+  }
+
+  if ((value.primary && typeof value.primary === 'object') || (value.secondary && typeof value.secondary === 'object')) {
+    candidates.push(value);
+  }
+
+  for (const child of Object.values(value)) {
+    candidates.push(...findRateLimitCandidates(child, depth + 1));
+  }
+
+  return candidates;
+}
+
+function sanitizeError(error) {
+  return String(error?.message || error || 'unknown error').replace(/Bearer\s+[A-Za-z0-9._~-]+/g, 'Bearer [redacted]');
+}
+
+function getCodexHome(config) {
+  const configured = String(config.get('codexHome', '') || '').trim();
+  if (configured) {
+    return expandHome(configured);
+  }
+
+  if (process.env.CODEX_HOME) {
+    return expandHome(process.env.CODEX_HOME);
+  }
+
+  return path.join(os.homedir(), '.codex');
+}
+
+function expandHome(value) {
+  if (value === '~') {
+    return os.homedir();
+  }
+
+  if (value.startsWith(`~${path.sep}`) || value.startsWith('~/')) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+
+  return value;
+}
+
+function getRecentRolloutFiles(sessionsDir, lookbackDays) {
+  if (!fs.existsSync(sessionsDir)) {
+    return [];
+  }
+
+  const files = [];
+  const now = new Date();
+  for (let offset = 0; offset < lookbackDays; offset += 1) {
+    const day = new Date(now);
+    day.setDate(now.getDate() - offset);
+    const dayDir = path.join(
+      sessionsDir,
+      String(day.getFullYear()),
+      String(day.getMonth() + 1).padStart(2, '0'),
+      String(day.getDate()).padStart(2, '0')
+    );
+
+    if (!fs.existsSync(dayDir)) {
+      continue;
+    }
+
+    for (const name of fs.readdirSync(dayDir)) {
+      if (!/^rollout-.*\.jsonl$/i.test(name)) {
+        continue;
+      }
+
+      const fullPath = path.join(dayDir, name);
+      const stat = fs.statSync(fullPath);
+      if (stat.isFile()) {
+        files.push({ fullPath, mtimeMs: stat.mtimeMs });
+      }
+    }
+  }
+
+  return files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+function findLatestRateLimits(filePath) {
+  let contents;
+  try {
+    contents = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return undefined;
+  }
+
+  const lines = contents.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line || !line.includes('rate_limits')) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(line);
+      const rateLimits = findRateLimitsObject(parsed);
+      if (rateLimits) {
+        return rateLimits;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
+function findRateLimitsObject(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8) {
+    return undefined;
+  }
+
+  if (value.rate_limits && typeof value.rate_limits === 'object') {
+    return value.rate_limits;
+  }
+
+  for (const child of Object.values(value)) {
+    const found = findRateLimitsObject(child, depth + 1);
+    if (found) {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeRateLimits(rateLimits, sourceFile) {
+  if (!rateLimits || typeof rateLimits !== 'object') {
+    return undefined;
+  }
+
+  const windows = [];
+  for (const key of ['primary', 'secondary']) {
+    const window = normalizeRateLimitWindow(rateLimits[key], key);
+    if (window) {
+      windows.push(window);
+    }
+  }
+
+  if (!windows.length && Array.isArray(rateLimits.windows)) {
+    for (const [index, rawWindow] of rateLimits.windows.entries()) {
+      const window = normalizeRateLimitWindow(rawWindow, `window-${index + 1}`);
+      if (window) {
+        windows.push(window);
+      }
+    }
+  }
+
+  if (!windows.length) {
+    return undefined;
+  }
+
+  windows.sort((a, b) => a.windowMinutes - b.windowMinutes);
+
+  return {
+    sourceFile,
+    capturedAt: Date.now(),
+    planType: typeof rateLimits.plan_type === 'string' ? rateLimits.plan_type : '',
+    credits: rateLimits.credits && typeof rateLimits.credits === 'object' ? rateLimits.credits : undefined,
+    windows
+  };
+}
+
+function normalizeRateLimitWindow(rawWindow, id) {
+  if (!rawWindow || typeof rawWindow !== 'object') {
+    return undefined;
+  }
+
+  const usedPercent = firstFiniteNumber(rawWindow.used_percent, rawWindow.usage_percent, rawWindow.percent_used, rawWindow.percent);
+  if (usedPercent === undefined) {
+    return undefined;
+  }
+
+  const windowMinutes = firstFiniteNumber(rawWindow.window_minutes, rawWindow.windowMinutes, rawWindow.minutes) || inferWindowMinutes(rawWindow);
+  const resetsAtMs = getResetTimestampMs(rawWindow);
+
+  return {
+    id,
+    label: formatWindowLabel(windowMinutes),
+    usedPercent: Math.max(0, Math.min(100, usedPercent)),
+    windowMinutes,
+    resetsAtMs
+  };
+}
+
+function inferWindowMinutes(rawWindow) {
+  const name = String(rawWindow.name || rawWindow.label || '').toLowerCase();
+  if (name.includes('month')) return 30 * 24 * 60;
+  if (name.includes('week')) return 7 * 24 * 60;
+  if (name.includes('day')) return 24 * 60;
+  if (name.includes('5h') || name.includes('5 hour')) return 5 * 60;
+  return 0;
+}
+
+function getResetTimestampMs(rawWindow) {
+  const resetsAt = firstFiniteNumber(rawWindow.resets_at, rawWindow.reset_at, rawWindow.resetsAt);
+  if (resetsAt !== undefined) {
+    return resetsAt > 1000000000000 ? resetsAt : resetsAt * 1000;
+  }
+
+  const resetsInSeconds = firstFiniteNumber(rawWindow.resets_in_seconds, rawWindow.resetsInSeconds);
+  if (resetsInSeconds !== undefined) {
+    return Date.now() + resetsInSeconds * 1000;
+  }
+
+  return 0;
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) {
+      return number;
+    }
+  }
+  return undefined;
+}
+
+function formatWindowLabel(windowMinutes) {
+  if (windowMinutes === 300) return '5-hour window';
+  if (windowMinutes === 1440) return 'Daily window';
+  if (windowMinutes === 10080) return 'Weekly window';
+  if (windowMinutes >= 40320 && windowMinutes <= 44640) return 'Monthly window';
+  if (windowMinutes > 0 && windowMinutes < 60) return `${windowMinutes}m window`;
+  if (windowMinutes > 0 && windowMinutes % 60 === 0 && windowMinutes < 1440) return `${windowMinutes / 60}h window`;
+  if (windowMinutes > 0 && windowMinutes % 1440 === 0) return `${windowMinutes / 1440}d window`;
+  return 'Usage window';
 }
 
 function rollExpiredPeriods(state) {
@@ -362,7 +851,129 @@ function getStatusClass(percent) {
   return 'good';
 }
 
-function renderDashboard(webview, state, surface) {
+function renderCodexUsageCards(snapshot) {
+  return snapshot.windows.map((window) => {
+    const percent = Math.round(window.usedPercent);
+    const status = getStatusClass(window.usedPercent);
+    const resetText = window.resetsAtMs ? `Resets ${formatResetTime(window.resetsAtMs)}` : 'Reset time unavailable';
+
+    return `<article class="card">
+        <div class="metric-head">
+          <span class="label">${escapeHtml(window.label)}</span>
+          <span class="badge ${status}">${percent}%</span>
+        </div>
+        <div class="usage-value">
+          <strong>${percent}%</strong>
+          <span>used</span>
+        </div>
+        <div class="bar">
+          <div class="track" aria-label="${escapeHtml(window.label)} usage progress">
+            <div class="fill ${status}" style="--progress: ${window.usedPercent}%"></div>
+          </div>
+          <div class="segments" aria-hidden="true">${renderSegments(window.usedPercent)}</div>
+        </div>
+        <div class="meta-row">
+          <span>${escapeHtml(resetText)}</span>
+          <span>${escapeHtml(formatWindowDuration(window.windowMinutes))}</span>
+        </div>
+      </article>`;
+  }).join('');
+}
+
+function renderManualUsageCards(state, monthlyPercent, windowPercent, monthStatus, windowStatus) {
+  return `<article class="card">
+        <div class="metric-head">
+          <span class="label">Monthly</span>
+          <span class="badge ${monthStatus}">${Math.round(monthlyPercent)}%</span>
+        </div>
+        <div class="usage-value">
+          <strong>${formatUsage(state.monthlyUsed)}</strong>
+          <span>of ${formatUsage(state.monthlyLimit)} units</span>
+        </div>
+        <div class="bar">
+          <div class="track" aria-label="Monthly usage progress">
+            <div class="fill ${monthStatus}" style="--progress: ${monthlyPercent}%"></div>
+          </div>
+          <div class="segments" aria-hidden="true">${renderSegments(monthlyPercent)}</div>
+        </div>
+        <div class="meta-row">
+          <span>Month ${escapeHtml(state.monthKey)}</span>
+          <button class="btn" data-command="resetMonth">Reset month</button>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="metric-head">
+          <span class="label">5-hour window</span>
+          <span class="badge ${windowStatus}">${Math.round(windowPercent)}%</span>
+        </div>
+        <div class="usage-value">
+          <strong>${formatUsage(state.windowUsed)}</strong>
+          <span>of ${formatUsage(state.windowLimit)} units</span>
+        </div>
+        <div class="bar">
+          <div class="track" aria-label="5-hour usage progress">
+            <div class="fill ${windowStatus}" style="--progress: ${windowPercent}%"></div>
+          </div>
+          <div class="segments" aria-hidden="true">${renderSegments(windowPercent)}</div>
+        </div>
+        <div class="meta-row">
+          <span>${escapeHtml(formatTimeLeft(state))}</span>
+          <button class="btn" data-command="resetWindow">Reset window</button>
+        </div>
+      </article>`;
+}
+
+function formatResetTime(timestampMs) {
+  const remainingMs = timestampMs - Date.now();
+  if (remainingMs <= 0) {
+    return 'now';
+  }
+
+  const days = Math.floor(remainingMs / (24 * 60 * 60 * 1000));
+  const hours = Math.floor((remainingMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+  const minutes = Math.ceil((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
+
+  if (days > 0) {
+    return `in ${days}d ${hours}h`;
+  }
+  if (hours > 0) {
+    return `in ${hours}h ${minutes}m`;
+  }
+  return `in ${minutes}m`;
+}
+
+function formatWindowDuration(windowMinutes) {
+  if (!windowMinutes) {
+    return 'Window length unavailable';
+  }
+  if (windowMinutes === 300) {
+    return '5 hours';
+  }
+  if (windowMinutes === 10080) {
+    return '7 days';
+  }
+  if (windowMinutes >= 40320 && windowMinutes <= 44640) {
+    return 'monthly';
+  }
+  if (windowMinutes % 1440 === 0) {
+    return `${windowMinutes / 1440} days`;
+  }
+  if (windowMinutes % 60 === 0) {
+    return `${windowMinutes / 60} hours`;
+  }
+  return `${windowMinutes} minutes`;
+}
+
+function formatSnapshotSource(snapshot) {
+  if (snapshot.fromEndpoint) {
+    return `Reading Codex usage from the authenticated endpoint. Source: ${snapshot.sourceFile}. The auth token is not shown or stored by this extension.`;
+  }
+
+  return `Reading Codex rate limits from local session rollout files. Source: ${path.basename(snapshot.sourceFile)}. No auth tokens are read.`;
+}
+
+function renderDashboard(webview, state, codexSnapshot, surface) {
   const nonce = getNonce();
   const monthlyPercent = clampPercent(state.monthlyUsed, state.monthlyLimit);
   const windowPercent = clampPercent(state.windowUsed, state.windowLimit);
@@ -370,6 +981,13 @@ function renderDashboard(webview, state, surface) {
   const windowStatus = getStatusClass(windowPercent);
   const latestEntries = state.entries.slice(0, 8);
   const isSidebar = surface === 'sidebar';
+  const hasCodexSnapshot = codexSnapshot && Array.isArray(codexSnapshot.windows) && codexSnapshot.windows.length > 0;
+  const usageCardsHtml = hasCodexSnapshot
+    ? renderCodexUsageCards(codexSnapshot)
+    : renderManualUsageCards(state, monthlyPercent, windowPercent, monthStatus, windowStatus);
+  const sourceHtml = hasCodexSnapshot
+    ? `<p class="note">${escapeHtml(formatSnapshotSource(codexSnapshot))}</p>`
+    : `<p class="note">Automatic Codex usage was not available: ${escapeHtml(codexSnapshot?.error || 'No snapshot found')}. Manual counters are shown instead.</p>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -785,57 +1403,18 @@ function renderDashboard(webview, state, surface) {
     <section class="topbar">
       <div class="title-block">
         <h1>Codex Usage</h1>
-        <p class="subtitle">Local counters for monthly usage and the active 5-hour reset window.</p>
+        <p class="subtitle">${hasCodexSnapshot ? 'Codex-reported rate-limit windows from local session files.' : 'Local counters for monthly usage and the active 5-hour reset window.'}</p>
       </div>
       <div class="actions">
         <button class="btn btn-primary" data-command="addUsage">Add usage</button>
+        <button class="btn" data-command="enableEndpoint">Enable endpoint</button>
         <button class="btn" data-command="setLimits">Set limits</button>
         <button class="btn" data-command="refresh">Refresh</button>
       </div>
     </section>
 
     <section class="grid" aria-label="Usage meters">
-      <article class="card">
-        <div class="metric-head">
-          <span class="label">Monthly</span>
-          <span class="badge ${monthStatus}">${Math.round(monthlyPercent)}%</span>
-        </div>
-        <div class="usage-value">
-          <strong>${formatUsage(state.monthlyUsed)}</strong>
-          <span>of ${formatUsage(state.monthlyLimit)} units</span>
-        </div>
-        <div class="bar">
-          <div class="track" aria-label="Monthly usage progress">
-            <div class="fill ${monthStatus}" style="--progress: ${monthlyPercent}%"></div>
-          </div>
-          <div class="segments" aria-hidden="true">${renderSegments(monthlyPercent)}</div>
-        </div>
-        <div class="meta-row">
-          <span>Month ${escapeHtml(state.monthKey)}</span>
-          <button class="btn" data-command="resetMonth">Reset month</button>
-        </div>
-      </article>
-
-      <article class="card">
-        <div class="metric-head">
-          <span class="label">5-hour window</span>
-          <span class="badge ${windowStatus}">${Math.round(windowPercent)}%</span>
-        </div>
-        <div class="usage-value">
-          <strong>${formatUsage(state.windowUsed)}</strong>
-          <span>of ${formatUsage(state.windowLimit)} units</span>
-        </div>
-        <div class="bar">
-          <div class="track" aria-label="5-hour usage progress">
-            <div class="fill ${windowStatus}" style="--progress: ${windowPercent}%"></div>
-          </div>
-          <div class="segments" aria-hidden="true">${renderSegments(windowPercent)}</div>
-        </div>
-        <div class="meta-row">
-          <span>${escapeHtml(formatTimeLeft(state))}</span>
-          <button class="btn" data-command="resetWindow">Reset window</button>
-        </div>
-      </article>
+      ${usageCardsHtml}
     </section>
 
     <section class="card history">
@@ -856,7 +1435,7 @@ function renderDashboard(webview, state, surface) {
       ` : '<div class="empty">No usage entries yet. Add usage after a Codex session to start the 5-hour window.</div>'}
     </section>
 
-    <p class="note">This dashboard is local-only. It does not read Codex credentials, billing data, or ChatGPT account usage. Use the same unit for entries and limits.</p>
+    ${sourceHtml}
   </main>
 
   <script nonce="${nonce}">
