@@ -2,7 +2,7 @@
   "name": "codex-usage-dashboard",
   "displayName": "Codex Usage Dashboard",
   "description": "Local monthly and 5-hour window usage visualization for Codex.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.92.0"
@@ -11,6 +11,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onView:codexUsageDashboard.sidebar",
     "onCommand:codexUsageDashboard.open",
     "onCommand:codexUsageDashboard.addUsage",
     "onCommand:codexUsageDashboard.setLimits",
@@ -19,6 +20,24 @@
   ],
   "main": "./src/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexUsageDashboard.container",
+          "title": "Codex Usage",
+          "icon": "media/codex-usage.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexUsageDashboard.container": [
+        {
+          "type": "webview",
+          "id": "codexUsageDashboard.sidebar",
+          "name": "Dashboard"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "codexUsageDashboard.open",

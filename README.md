@@ -1,8 +1,8 @@
 # Codex Usage Dashboard
 
-Local VS Code dashboard for visualizing Codex usage against a monthly limit and a 5-hour reset window.
+Local VS Code sidebar dashboard for visualizing Codex usage against a monthly limit and a 5-hour reset window.
 
-This extension does not read Codex credentials, account data, billing data, or private OpenAI usage APIs. It stores local counters in VS Code global storage. Use **Codex Usage: Add Usage** after a Codex session, or use the dashboard buttons.
+This extension does not read Codex credentials, account data, billing data, or private OpenAI usage APIs. It stores local counters in VS Code global storage. Open the **Codex Usage** icon in the Activity Bar and use the dashboard buttons.
 
 ## Commands
 
@@ -11,6 +11,10 @@ This extension does not read Codex credentials, account data, billing data, or p
 - `Codex Usage: Set Limits`
 - `Codex Usage: Reset 5-Hour Window`
 - `Codex Usage: Reset Monthly Usage`
+
+## Sidebar
+
+After installation, VS Code adds a **Codex Usage** icon to the Activity Bar. The sidebar dashboard includes buttons for adding usage, setting limits, refreshing, and resetting the monthly or 5-hour counters.
 
 ## Usage Model
 

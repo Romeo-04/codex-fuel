@@ -5,9 +5,17 @@ const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 const MAX_ENTRIES = 120;
 
 let activePanel;
+let sidebarView;
 
 function activate(context) {
+  const provider = new UsageSidebarProvider(context);
+
   context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('codexUsageDashboard.sidebar', provider, {
+      webviewOptions: {
+        retainContextWhenHidden: true
+      }
+    }),
     vscode.commands.registerCommand('codexUsageDashboard.open', () => openDashboard(context)),
     vscode.commands.registerCommand('codexUsageDashboard.addUsage', () => promptAddUsage(context)),
     vscode.commands.registerCommand('codexUsageDashboard.setLimits', () => promptSetLimits(context)),
@@ -18,12 +26,47 @@ function activate(context) {
 
 function deactivate() {}
 
-function openDashboard(context) {
+class UsageSidebarProvider {
+  constructor(context) {
+    this.context = context;
+  }
+
+  resolveWebviewView(webviewView) {
+    sidebarView = webviewView;
+    webviewView.webview.options = {
+      enableScripts: true
+    };
+
+    webviewView.onDidDispose(() => {
+      if (sidebarView === webviewView) {
+        sidebarView = undefined;
+      }
+    });
+
+    webviewView.webview.onDidReceiveMessage((message) => {
+      handleWebviewMessage(this.context, message);
+    });
+
+    refreshViews(this.context);
+  }
+}
+
+async function openDashboard(context) {
+  try {
+    await vscode.commands.executeCommand('workbench.view.extension.codexUsageDashboard.container');
+    await vscode.commands.executeCommand('codexUsageDashboard.sidebar.focus');
+    refreshViews(context);
+  } catch {
+    openDashboardPanel(context);
+  }
+}
+
+function openDashboardPanel(context) {
   const column = vscode.window.activeTextEditor?.viewColumn || vscode.ViewColumn.One;
 
   if (activePanel) {
     activePanel.reveal(column);
-    refreshPanel(context);
+    refreshViews(context);
     return;
   }
 
@@ -42,26 +85,30 @@ function openDashboard(context) {
   }, null, context.subscriptions);
 
   activePanel.webview.onDidReceiveMessage(async (message) => {
-    switch (message.type) {
-      case 'addUsage':
-        await promptAddUsage(context);
-        break;
-      case 'setLimits':
-        await promptSetLimits(context);
-        break;
-      case 'resetWindow':
-        await resetWindow(context);
-        break;
-      case 'resetMonth':
-        await resetMonth(context);
-        break;
-      case 'refresh':
-        refreshPanel(context);
-        break;
-    }
+    await handleWebviewMessage(context, message);
   }, undefined, context.subscriptions);
 
-  refreshPanel(context);
+  refreshViews(context);
+}
+
+async function handleWebviewMessage(context, message) {
+  switch (message.type) {
+    case 'addUsage':
+      await promptAddUsage(context);
+      break;
+    case 'setLimits':
+      await promptSetLimits(context);
+      break;
+    case 'resetWindow':
+      await resetWindow(context);
+      break;
+    case 'resetMonth':
+      await resetMonth(context);
+      break;
+    case 'refresh':
+      refreshViews(context);
+      break;
+  }
 }
 
 async function promptAddUsage(context) {
@@ -106,7 +153,7 @@ async function promptAddUsage(context) {
   state.entries = state.entries.slice(0, MAX_ENTRIES);
 
   await saveState(context, state);
-  refreshPanel(context);
+  refreshViews(context);
 }
 
 async function promptSetLimits(context) {
@@ -136,7 +183,7 @@ async function promptSetLimits(context) {
   state.windowLimit = roundUsage(Number(windowLimitText));
 
   await saveState(context, state);
-  refreshPanel(context);
+  refreshViews(context);
 }
 
 async function resetWindow(context) {
@@ -144,7 +191,7 @@ async function resetWindow(context) {
   state.windowUsed = 0;
   state.windowStartedAt = Date.now();
   await saveState(context, state);
-  refreshPanel(context);
+  refreshViews(context);
 }
 
 async function resetMonth(context) {
@@ -152,11 +199,11 @@ async function resetMonth(context) {
   state.monthlyUsed = 0;
   state.monthKey = getMonthKey();
   await saveState(context, state);
-  refreshPanel(context);
+  refreshViews(context);
 }
 
-function refreshPanel(context) {
-  if (!activePanel) {
+function refreshViews(context) {
+  if (!activePanel && !sidebarView) {
     return;
   }
 
@@ -166,7 +213,13 @@ function refreshPanel(context) {
     saveState(context, state);
   }
 
-  activePanel.webview.html = renderDashboard(activePanel.webview, state);
+  if (activePanel) {
+    activePanel.webview.html = renderDashboard(activePanel.webview, state, 'panel');
+  }
+
+  if (sidebarView) {
+    sidebarView.webview.html = renderDashboard(sidebarView.webview, state, 'sidebar');
+  }
 }
 
 function normalizeState(context) {
@@ -309,13 +362,14 @@ function getStatusClass(percent) {
   return 'good';
 }
 
-function renderDashboard(webview, state) {
+function renderDashboard(webview, state, surface) {
   const nonce = getNonce();
   const monthlyPercent = clampPercent(state.monthlyUsed, state.monthlyLimit);
   const windowPercent = clampPercent(state.windowUsed, state.windowLimit);
   const monthStatus = getStatusClass(monthlyPercent);
   const windowStatus = getStatusClass(windowPercent);
   const latestEntries = state.entries.slice(0, 8);
+  const isSidebar = surface === 'sidebar';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -651,6 +705,74 @@ function renderDashboard(webview, state) {
       }
     }
 
+    body.sidebar .shell {
+      padding: var(--space-3);
+      gap: var(--space-4);
+    }
+
+    body.sidebar .topbar {
+      display: grid;
+      gap: var(--space-3);
+    }
+
+    body.sidebar h1 {
+      font-size: var(--text-lg);
+    }
+
+    body.sidebar .subtitle {
+      display: none;
+    }
+
+    body.sidebar .actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      justify-content: stretch;
+      gap: var(--space-2);
+    }
+
+    body.sidebar .actions .btn:first-child {
+      grid-column: 1 / -1;
+    }
+
+    body.sidebar .btn {
+      width: 100%;
+      min-height: 34px;
+      padding-inline: var(--space-2);
+      font-size: var(--text-xs);
+    }
+
+    body.sidebar .grid {
+      grid-template-columns: 1fr;
+      gap: var(--space-3);
+    }
+
+    body.sidebar .card {
+      padding: var(--space-3);
+      gap: var(--space-3);
+    }
+
+    body.sidebar .usage-value strong {
+      font-size: var(--text-lg);
+    }
+
+    body.sidebar .segment {
+      height: 20px;
+    }
+
+    body.sidebar .meta-row {
+      display: grid;
+      gap: var(--space-2);
+    }
+
+    body.sidebar .entry {
+      grid-template-columns: 1fr;
+      gap: var(--space-1);
+    }
+
+    body.sidebar .entry-time {
+      white-space: normal;
+    }
+
     @media (prefers-reduced-motion: reduce) {
       * {
         transition-duration: 0.01ms !important;
@@ -658,7 +780,7 @@ function renderDashboard(webview, state) {
     }
   </style>
 </head>
-<body>
+<body class="${isSidebar ? 'sidebar' : 'panel'}">
   <main class="shell">
     <section class="topbar">
       <div class="title-block">
