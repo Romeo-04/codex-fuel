@@ -1,4 +1,4 @@
-# Codex Usage Dashboard
+# Codex Fuel
 
 Local VS Code sidebar dashboard for visualizing Codex usage with two compact usage bars.
 
@@ -6,12 +6,11 @@ This extension does not read Codex credentials, account data, billing data, or p
 
 ## Commands
 
-- `Codex Usage: Open Dashboard`
-The sidebar includes a single **Refresh** button.
+- `Codex Fuel: Open Dashboard`
 
 ## Sidebar
 
-After installation, VS Code adds a **Codex Usage** icon to the Activity Bar. The sidebar shows two simple bars: the short reset window and the long/monthly window. Hover over a bar to see reset timing, source, and window details.
+After installation, VS Code adds a **Codex Fuel** icon to the Activity Bar. The sidebar shows two simple bars: the short reset window and the long/monthly window. Hover over a bar to see reset timing and window details.
 
 ## Automatic Codex Usage
 

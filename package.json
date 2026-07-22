@@ -1,6 +1,6 @@
 {
   "name": "codex-usage-dashboard",
-  "displayName": "Codex Usage Dashboard",
+  "displayName": "Codex Fuel",
   "description": "Read-only Codex usage bars for VS Code.",
   "version": "0.6.0",
   "publisher": "local",
@@ -12,7 +12,8 @@
   ],
   "activationEvents": [
     "onView:codexUsageDashboard.sidebar",
-    "onCommand:codexUsageDashboard.open"
+    "onCommand:codexUsageDashboard.open",
+    "onCommand:codexUsageDashboard.refresh"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -20,7 +21,7 @@
       "activitybar": [
         {
           "id": "codexUsageDashboard.container",
-          "title": "Codex Usage",
+          "title": "Codex Fuel",
           "icon": "media/codex-usage.svg"
         }
       ]
@@ -30,19 +31,26 @@
         {
           "type": "webview",
           "id": "codexUsageDashboard.sidebar",
-          "name": "Dashboard"
+          "name": "Codex Fuel"
         }
       ]
     },
     "commands": [
       {
         "command": "codexUsageDashboard.open",
-        "title": "Codex Usage: Open Dashboard",
-        "category": "Codex Usage"
+        "title": "Codex Fuel: Open Dashboard",
+        "category": "Codex Fuel"
+      },
+      {
+        "command": "codexUsageDashboard.refresh",
+        "title": "Refresh",
+        "category": "Codex Fuel",
+        "icon": "$(refresh)"
       }
     ],
+
     "configuration": {
-      "title": "Codex Usage Dashboard",
+      "title": "Codex Fuel",
       "properties": {
         "codexUsageDashboard.autoReadCodexSessions": {
           "type": "boolean",

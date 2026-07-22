@@ -19,7 +19,8 @@ function activate(context) {
         retainContextWhenHidden: true
       }
     }),
-    vscode.commands.registerCommand('codexUsageDashboard.open', () => openDashboard(context))
+    vscode.commands.registerCommand('codexUsageDashboard.open', () => openDashboard(context)),
+    vscode.commands.registerCommand('codexUsageDashboard.refresh', () => refreshViews(context))
   );
 
   scheduleRefreshTimer(context);
@@ -95,7 +96,7 @@ function openDashboardPanel(context) {
 
   activePanel = vscode.window.createWebviewPanel(
     'codexUsageDashboard',
-    'Codex Usage',
+    'Codex Fuel',
     column,
     {
       enableScripts: true,
@@ -618,10 +619,9 @@ function renderCodexUsageBars(snapshot) {
     const status = getStatusClass(window.usedPercent);
     const resetText = window.resetsAtMs ? `Resets ${formatResetTime(window.resetsAtMs)}` : 'Reset time unavailable';
     const tooltip = [
-      `${window.label}: ${percent}% used`,
       resetText,
-      `Window length: ${formatWindowDuration(window.windowMinutes)}`,
-      snapshot.fromEndpoint ? 'Source: authenticated endpoint' : `Source: ${path.basename(snapshot.sourceFile)}`
+      `${window.label}: ${percent}% used`,
+      `Window length: ${formatWindowDuration(window.windowMinutes)}`
     ].join('\n');
 
     return `<article class="meter">
@@ -629,8 +629,8 @@ function renderCodexUsageBars(snapshot) {
           <span class="label">${escapeHtml(window.label)}</span>
           <span class="badge ${status}">${percent}%</span>
         </div>
-        <div class="bar" title="${escapeHtml(tooltip)}">
-          <div class="track" aria-label="${escapeHtml(window.label)} usage progress" title="${escapeHtml(tooltip)}">
+        <div class="bar" data-tooltip="${escapeHtml(tooltip)}" title="${escapeHtml(resetText)}">
+          <div class="track" aria-label="${escapeHtml(window.label)} usage progress">
             <div class="fill ${status}" style="--progress: ${window.usedPercent}%"></div>
           </div>
         </div>
@@ -679,32 +679,24 @@ function formatWindowDuration(windowMinutes) {
   return `${windowMinutes} minutes`;
 }
 
-function formatSnapshotSource(snapshot) {
-  if (snapshot.fromEndpoint) {
-    return `Reading Codex usage from the authenticated endpoint. Source: ${snapshot.sourceFile}. The auth token is not shown or stored by this extension.`;
-  }
-
-  return `Reading Codex rate limits from local session rollout files. Source: ${path.basename(snapshot.sourceFile)}. No auth tokens are read.`;
-}
 
 function renderDashboard(webview, codexSnapshot, surface) {
-  const nonce = getNonce();
   const isSidebar = surface === 'sidebar';
   const hasCodexSnapshot = codexSnapshot && Array.isArray(codexSnapshot.windows) && codexSnapshot.windows.length > 0;
   const usageCardsHtml = hasCodexSnapshot
     ? renderCodexUsageBars(codexSnapshot)
     : `<div class="empty" title="${escapeHtml(codexSnapshot?.error || 'No Codex usage data found')}">No usage data found</div>`;
   const sourceHtml = hasCodexSnapshot
-    ? `<p class="note">${escapeHtml(formatSnapshotSource(codexSnapshot))}</p>`
+    ? ''
     : `<p class="note">${escapeHtml(codexSnapshot?.error || 'Refresh after Codex writes a usage snapshot.')}</p>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Codex Usage</title>
+  <title>Codex Fuel</title>
   <style>
     :root {
       --space-1: 4px;
@@ -763,78 +755,14 @@ function renderDashboard(webview, codexSnapshot, surface) {
     }
 
     .shell {
-      max-width: 980px;
+      container-type: inline-size;
+      width: min(100%, 980px);
       margin-inline: auto;
-      padding: var(--space-8);
+      padding: clamp(var(--space-3), 4cqi, var(--space-8));
       display: grid;
-      gap: var(--space-6);
+      gap: clamp(var(--space-3), 3cqi, var(--space-6));
     }
 
-    .topbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: var(--space-4);
-    }
-
-    .title-block {
-      display: grid;
-      gap: var(--space-1);
-      min-width: 0;
-    }
-
-    h1 {
-      margin: 0;
-      font-size: var(--text-xl);
-      line-height: var(--leading-tight);
-      font-weight: var(--weight-semibold);
-      letter-spacing: 0;
-    }
-
-    .actions {
-      display: flex;
-      justify-content: flex-end;
-    }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 36px;
-      padding: 0 var(--space-3);
-      border-radius: var(--radius-sm);
-      border: 1px solid transparent;
-      color: var(--text);
-      background: transparent;
-      cursor: pointer;
-      font-size: var(--text-sm);
-      font-weight: var(--weight-medium);
-      transition: background 160ms ease-out, border-color 160ms ease-out, transform 120ms ease-out;
-    }
-
-    .btn:hover {
-      background: var(--surface-2);
-      border-color: var(--border);
-    }
-
-    .btn:active {
-      transform: translateY(1px);
-    }
-
-    .btn:focus-visible {
-      outline: 2px solid var(--focus);
-      outline-offset: 2px;
-    }
-
-    .btn-primary {
-      background: var(--accent);
-      color: var(--accent-contrast);
-    }
-
-    .btn-primary:hover {
-      background: var(--accent-hover);
-      border-color: transparent;
-    }
 
     .meters {
       display: grid;
@@ -894,13 +822,43 @@ function renderDashboard(webview, codexSnapshot, surface) {
     }
 
     .bar {
+      position: relative;
       display: grid;
       gap: var(--space-1);
     }
 
+    .bar::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 0;
+      bottom: calc(100% + var(--space-2));
+      z-index: 1;
+      width: max-content;
+      max-width: min(280px, 90cqi);
+      padding: var(--space-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      background: var(--surface-2);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+      font-size: var(--text-xs);
+      line-height: 1.35;
+      white-space: pre-line;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(var(--space-1));
+      transition: opacity 140ms ease-out, transform 140ms ease-out;
+    }
+
+    .bar:hover::after,
+    .bar:focus-within::after {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
     .track {
       width: 100%;
-      height: 14px;
+      height: clamp(14px, 2.8cqi, 20px);
       overflow: hidden;
       border-radius: var(--radius-pill);
       background: var(--surface-2);
@@ -933,47 +891,34 @@ function renderDashboard(webview, codexSnapshot, surface) {
       text-align: center;
     }
 
-    @media (max-width: 760px) {
-      .shell {
-        padding: var(--space-4);
+    @container (max-width: 420px) {
+      .meters {
+        gap: var(--space-2);
       }
 
-      .topbar {
-        display: grid;
+      .meter {
+        gap: var(--space-1);
       }
 
-      .actions {
-        justify-content: flex-start;
+      .badge {
+        min-height: 22px;
       }
+    }
 
+    @container (max-width: 260px) {
+      .label {
+        font-size: var(--text-xs);
+      }
     }
 
     body.sidebar .shell {
-      padding: var(--space-3);
-      gap: var(--space-4);
-    }
-
-    body.sidebar .topbar {
-      display: grid;
+      padding: var(--space-2);
       gap: var(--space-3);
     }
 
-    body.sidebar h1 {
-      font-size: var(--text-lg);
-    }
-
-    body.sidebar .actions {
-      justify-content: flex-end;
-    }
-
-    body.sidebar .btn {
-      min-height: 34px;
-      padding-inline: var(--space-2);
-      font-size: var(--text-xs);
-    }
 
     body.sidebar .meters {
-      gap: var(--space-4);
+      gap: var(--space-3);
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -985,15 +930,6 @@ function renderDashboard(webview, codexSnapshot, surface) {
 </head>
 <body class="${isSidebar ? 'sidebar' : 'panel'}">
   <main class="shell">
-    <section class="topbar">
-      <div class="title-block">
-        <h1>Codex Usage</h1>
-      </div>
-      <div class="actions">
-        <button class="btn" data-command="refresh">Refresh</button>
-      </div>
-    </section>
-
     <section class="meters" aria-label="Usage meters">
       ${usageCardsHtml}
     </section>
@@ -1001,14 +937,7 @@ function renderDashboard(webview, codexSnapshot, surface) {
     ${sourceHtml}
   </main>
 
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    document.addEventListener('click', (event) => {
-      const button = event.target.closest('[data-command]');
-      if (!button) return;
-      vscode.postMessage({ type: button.dataset.command });
-    });
-  </script>
+
 </body>
 </html>`;
 }
