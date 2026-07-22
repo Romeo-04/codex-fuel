@@ -4,9 +4,6 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 
-const STATE_KEY = 'codexUsageDashboard.state';
-const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
-const MAX_ENTRIES = 120;
 const DEFAULT_LOOKBACK_DAYS = 14;
 
 let activePanel;
@@ -22,11 +19,7 @@ function activate(context) {
         retainContextWhenHidden: true
       }
     }),
-    vscode.commands.registerCommand('codexUsageDashboard.open', () => openDashboard(context)),
-    vscode.commands.registerCommand('codexUsageDashboard.addUsage', () => promptAddUsage(context)),
-    vscode.commands.registerCommand('codexUsageDashboard.setLimits', () => promptSetLimits(context)),
-    vscode.commands.registerCommand('codexUsageDashboard.resetWindow', () => resetWindow(context)),
-    vscode.commands.registerCommand('codexUsageDashboard.resetMonth', () => resetMonth(context))
+    vscode.commands.registerCommand('codexUsageDashboard.open', () => openDashboard(context))
   );
 
   scheduleRefreshTimer(context);
@@ -123,134 +116,10 @@ function openDashboardPanel(context) {
 
 async function handleWebviewMessage(context, message) {
   switch (message.type) {
-    case 'addUsage':
-      await promptAddUsage(context);
-      break;
-    case 'setLimits':
-      await promptSetLimits(context);
-      break;
-    case 'resetWindow':
-      await resetWindow(context);
-      break;
-    case 'resetMonth':
-      await resetMonth(context);
-      break;
-    case 'enableEndpoint':
-      await promptEnableEndpoint(context);
-      break;
     case 'refresh':
       refreshViews(context);
       break;
   }
-}
-
-async function promptEnableEndpoint(context) {
-  const choice = await vscode.window.showWarningMessage(
-    'Enable authenticated Codex usage endpoint? This reads CODEX_HOME/auth.json to extract a bearer token and sends it only to https://chatgpt.com/backend-api/wham/usage. The endpoint is undocumented and may break.',
-    { modal: true },
-    'Enable'
-  );
-
-  if (choice !== 'Enable') {
-    return;
-  }
-
-  const config = vscode.workspace.getConfiguration('codexUsageDashboard');
-  await config.update('experimentalReadAuthJson', true, vscode.ConfigurationTarget.Global);
-  await config.update('dataSource', 'auto', vscode.ConfigurationTarget.Global);
-  vscode.window.showInformationMessage('Codex usage endpoint enabled for this VS Code profile.');
-  refreshViews(context);
-}
-
-async function promptAddUsage(context) {
-  const amountText = await vscode.window.showInputBox({
-    title: 'Add Codex usage',
-    prompt: 'Enter usage units to add. Use the same unit as your limits, such as credits, requests, or percent points.',
-    placeHolder: 'Example: 3',
-    validateInput(value) {
-      const number = Number(value);
-      if (!Number.isFinite(number) || number <= 0) {
-        return 'Enter a number greater than 0.';
-      }
-      return undefined;
-    }
-  });
-
-  if (!amountText) {
-    return;
-  }
-
-  const note = await vscode.window.showInputBox({
-    title: 'Usage note',
-    prompt: 'Optional note for this entry.',
-    placeHolder: 'Example: refactor session'
-  });
-
-  const state = normalizeState(context);
-  rollExpiredPeriods(state);
-
-  const amount = roundUsage(Number(amountText));
-  if (!state.windowStartedAt) {
-    state.windowStartedAt = Date.now();
-  }
-
-  state.monthlyUsed = roundUsage(state.monthlyUsed + amount);
-  state.windowUsed = roundUsage(state.windowUsed + amount);
-  state.entries.unshift({
-    amount,
-    note: note || '',
-    timestamp: Date.now()
-  });
-  state.entries = state.entries.slice(0, MAX_ENTRIES);
-
-  await saveState(context, state);
-  refreshViews(context);
-}
-
-async function promptSetLimits(context) {
-  const state = normalizeState(context);
-
-  const monthlyLimitText = await vscode.window.showInputBox({
-    title: 'Set monthly Codex usage limit',
-    prompt: 'Enter the local monthly limit.',
-    value: String(state.monthlyLimit),
-    validateInput: validateNonNegativeNumber
-  });
-  if (monthlyLimitText === undefined) {
-    return;
-  }
-
-  const windowLimitText = await vscode.window.showInputBox({
-    title: 'Set 5-hour Codex usage limit',
-    prompt: 'Enter the local 5-hour window limit.',
-    value: String(state.windowLimit),
-    validateInput: validateNonNegativeNumber
-  });
-  if (windowLimitText === undefined) {
-    return;
-  }
-
-  state.monthlyLimit = roundUsage(Number(monthlyLimitText));
-  state.windowLimit = roundUsage(Number(windowLimitText));
-
-  await saveState(context, state);
-  refreshViews(context);
-}
-
-async function resetWindow(context) {
-  const state = normalizeState(context);
-  state.windowUsed = 0;
-  state.windowStartedAt = Date.now();
-  await saveState(context, state);
-  refreshViews(context);
-}
-
-async function resetMonth(context) {
-  const state = normalizeState(context);
-  state.monthlyUsed = 0;
-  state.monthKey = getMonthKey();
-  await saveState(context, state);
-  refreshViews(context);
 }
 
 async function refreshViews(context) {
@@ -258,53 +127,20 @@ async function refreshViews(context) {
     return;
   }
 
-  const state = normalizeState(context);
-  const didRoll = rollExpiredPeriods(state);
   const codexSnapshot = await readUsageSnapshot(context);
-  if (didRoll) {
-    saveState(context, state);
-  }
 
   if (activePanel) {
-    activePanel.webview.html = renderDashboard(activePanel.webview, state, codexSnapshot, 'panel');
+    activePanel.webview.html = renderDashboard(activePanel.webview, codexSnapshot, 'panel');
   }
 
   if (sidebarView) {
-    sidebarView.webview.html = renderDashboard(sidebarView.webview, state, codexSnapshot, 'sidebar');
+    sidebarView.webview.html = renderDashboard(sidebarView.webview, codexSnapshot, 'sidebar');
   }
-}
-
-function normalizeState(context) {
-  const config = vscode.workspace.getConfiguration('codexUsageDashboard');
-  const defaultMonthlyLimit = Number(config.get('defaultMonthlyLimit', 100));
-  const defaultFiveHourLimit = Number(config.get('defaultFiveHourLimit', 25));
-  const saved = context.globalState.get(STATE_KEY, {});
-
-  const state = {
-    monthlyLimit: toFiniteNumber(saved.monthlyLimit, defaultMonthlyLimit),
-    monthlyUsed: toFiniteNumber(saved.monthlyUsed, 0),
-    monthKey: typeof saved.monthKey === 'string' ? saved.monthKey : getMonthKey(),
-    windowLimit: toFiniteNumber(saved.windowLimit, defaultFiveHourLimit),
-    windowUsed: toFiniteNumber(saved.windowUsed, 0),
-    windowStartedAt: toFiniteNumber(saved.windowStartedAt, 0),
-    entries: Array.isArray(saved.entries) ? saved.entries : []
-  };
-
-  if (state.monthlyLimit < 0) state.monthlyLimit = 0;
-  if (state.windowLimit < 0) state.windowLimit = 0;
-  if (state.monthlyUsed < 0) state.monthlyUsed = 0;
-  if (state.windowUsed < 0) state.windowUsed = 0;
-
-  return state;
 }
 
 async function readUsageSnapshot(context) {
   const config = vscode.workspace.getConfiguration('codexUsageDashboard');
   const dataSource = String(config.get('dataSource', 'auto'));
-
-  if (dataSource === 'manual') {
-    return undefined;
-  }
 
   if (dataSource === 'endpoint') {
     return readEndpointUsageSnapshot(context);
@@ -735,47 +571,21 @@ function formatWindowLabel(windowMinutes) {
   return 'Usage window';
 }
 
-function rollExpiredPeriods(state) {
-  let changed = false;
-  const currentMonth = getMonthKey();
-  if (state.monthKey !== currentMonth) {
-    state.monthKey = currentMonth;
-    state.monthlyUsed = 0;
-    changed = true;
+function pickDisplayWindows(windows) {
+  if (!Array.isArray(windows) || windows.length === 0) {
+    return [];
   }
 
-  if (state.windowStartedAt && Date.now() - state.windowStartedAt >= FIVE_HOURS_MS) {
-    state.windowStartedAt = 0;
-    state.windowUsed = 0;
-    changed = true;
+  const fiveHour = windows.find((window) => window.windowMinutes === 300);
+  const shortWindow = fiveHour || windows[0];
+  const monthlyWindow = windows.find((window) => window.windowMinutes >= 40320 && window.windowMinutes <= 44640);
+  const longWindow = monthlyWindow || windows[windows.length - 1];
+
+  if (shortWindow === longWindow) {
+    return [shortWindow];
   }
 
-  return changed;
-}
-
-function saveState(context, state) {
-  return context.globalState.update(STATE_KEY, state);
-}
-
-function validateNonNegativeNumber(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0) {
-    return 'Enter a number greater than or equal to 0.';
-  }
-  return undefined;
-}
-
-function toFiniteNumber(value, fallback) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
-function roundUsage(value) {
-  return Math.round(value * 100) / 100;
-}
-
-function getMonthKey(date = new Date()) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  return [shortWindow, longWindow];
 }
 
 function getNonce() {
@@ -787,46 +597,6 @@ function getNonce() {
   return nonce;
 }
 
-function clampPercent(used, limit) {
-  if (limit <= 0) {
-    return used > 0 ? 100 : 0;
-  }
-  return Math.max(0, Math.min(100, (used / limit) * 100));
-}
-
-function formatUsage(value) {
-  return Number(value).toLocaleString(undefined, {
-    maximumFractionDigits: 2
-  });
-}
-
-function formatDateTime(timestamp) {
-  if (!timestamp) {
-    return 'Not started';
-  }
-  return new Date(timestamp).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  });
-}
-
-function formatTimeLeft(state) {
-  if (!state.windowStartedAt) {
-    return 'Starts on next usage entry';
-  }
-
-  const remaining = Math.max(0, state.windowStartedAt + FIVE_HOURS_MS - Date.now());
-  const hours = Math.floor(remaining / (60 * 60 * 1000));
-  const minutes = Math.ceil((remaining % (60 * 60 * 1000)) / (60 * 1000));
-
-  if (hours <= 0) {
-    return `${minutes}m until reset`;
-  }
-  return `${hours}h ${minutes}m until reset`;
-}
-
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -836,92 +606,36 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function renderSegments(percent) {
-  const activeSegments = Math.ceil(percent / 10);
-  const segments = [];
-  for (let index = 1; index <= 10; index += 1) {
-    segments.push(`<span class="segment ${index <= activeSegments ? 'segment-active' : ''}"></span>`);
-  }
-  return segments.join('');
-}
-
 function getStatusClass(percent) {
   if (percent >= 90) return 'danger';
   if (percent >= 70) return 'warning';
   return 'good';
 }
 
-function renderCodexUsageCards(snapshot) {
-  return snapshot.windows.map((window) => {
+function renderCodexUsageBars(snapshot) {
+  return pickDisplayWindows(snapshot.windows).map((window) => {
     const percent = Math.round(window.usedPercent);
     const status = getStatusClass(window.usedPercent);
     const resetText = window.resetsAtMs ? `Resets ${formatResetTime(window.resetsAtMs)}` : 'Reset time unavailable';
+    const tooltip = [
+      `${window.label}: ${percent}% used`,
+      resetText,
+      `Window length: ${formatWindowDuration(window.windowMinutes)}`,
+      snapshot.fromEndpoint ? 'Source: authenticated endpoint' : `Source: ${path.basename(snapshot.sourceFile)}`
+    ].join('\n');
 
-    return `<article class="card">
-        <div class="metric-head">
+    return `<article class="meter">
+        <div class="meter-head">
           <span class="label">${escapeHtml(window.label)}</span>
           <span class="badge ${status}">${percent}%</span>
         </div>
-        <div class="usage-value">
-          <strong>${percent}%</strong>
-          <span>used</span>
-        </div>
-        <div class="bar">
-          <div class="track" aria-label="${escapeHtml(window.label)} usage progress">
+        <div class="bar" title="${escapeHtml(tooltip)}">
+          <div class="track" aria-label="${escapeHtml(window.label)} usage progress" title="${escapeHtml(tooltip)}">
             <div class="fill ${status}" style="--progress: ${window.usedPercent}%"></div>
           </div>
-          <div class="segments" aria-hidden="true">${renderSegments(window.usedPercent)}</div>
-        </div>
-        <div class="meta-row">
-          <span>${escapeHtml(resetText)}</span>
-          <span>${escapeHtml(formatWindowDuration(window.windowMinutes))}</span>
         </div>
       </article>`;
   }).join('');
-}
-
-function renderManualUsageCards(state, monthlyPercent, windowPercent, monthStatus, windowStatus) {
-  return `<article class="card">
-        <div class="metric-head">
-          <span class="label">Monthly</span>
-          <span class="badge ${monthStatus}">${Math.round(monthlyPercent)}%</span>
-        </div>
-        <div class="usage-value">
-          <strong>${formatUsage(state.monthlyUsed)}</strong>
-          <span>of ${formatUsage(state.monthlyLimit)} units</span>
-        </div>
-        <div class="bar">
-          <div class="track" aria-label="Monthly usage progress">
-            <div class="fill ${monthStatus}" style="--progress: ${monthlyPercent}%"></div>
-          </div>
-          <div class="segments" aria-hidden="true">${renderSegments(monthlyPercent)}</div>
-        </div>
-        <div class="meta-row">
-          <span>Month ${escapeHtml(state.monthKey)}</span>
-          <button class="btn" data-command="resetMonth">Reset month</button>
-        </div>
-      </article>
-
-      <article class="card">
-        <div class="metric-head">
-          <span class="label">5-hour window</span>
-          <span class="badge ${windowStatus}">${Math.round(windowPercent)}%</span>
-        </div>
-        <div class="usage-value">
-          <strong>${formatUsage(state.windowUsed)}</strong>
-          <span>of ${formatUsage(state.windowLimit)} units</span>
-        </div>
-        <div class="bar">
-          <div class="track" aria-label="5-hour usage progress">
-            <div class="fill ${windowStatus}" style="--progress: ${windowPercent}%"></div>
-          </div>
-          <div class="segments" aria-hidden="true">${renderSegments(windowPercent)}</div>
-        </div>
-        <div class="meta-row">
-          <span>${escapeHtml(formatTimeLeft(state))}</span>
-          <button class="btn" data-command="resetWindow">Reset window</button>
-        </div>
-      </article>`;
 }
 
 function formatResetTime(timestampMs) {
@@ -973,21 +687,16 @@ function formatSnapshotSource(snapshot) {
   return `Reading Codex rate limits from local session rollout files. Source: ${path.basename(snapshot.sourceFile)}. No auth tokens are read.`;
 }
 
-function renderDashboard(webview, state, codexSnapshot, surface) {
+function renderDashboard(webview, codexSnapshot, surface) {
   const nonce = getNonce();
-  const monthlyPercent = clampPercent(state.monthlyUsed, state.monthlyLimit);
-  const windowPercent = clampPercent(state.windowUsed, state.windowLimit);
-  const monthStatus = getStatusClass(monthlyPercent);
-  const windowStatus = getStatusClass(windowPercent);
-  const latestEntries = state.entries.slice(0, 8);
   const isSidebar = surface === 'sidebar';
   const hasCodexSnapshot = codexSnapshot && Array.isArray(codexSnapshot.windows) && codexSnapshot.windows.length > 0;
   const usageCardsHtml = hasCodexSnapshot
-    ? renderCodexUsageCards(codexSnapshot)
-    : renderManualUsageCards(state, monthlyPercent, windowPercent, monthStatus, windowStatus);
+    ? renderCodexUsageBars(codexSnapshot)
+    : `<div class="empty" title="${escapeHtml(codexSnapshot?.error || 'No Codex usage data found')}">No usage data found</div>`;
   const sourceHtml = hasCodexSnapshot
     ? `<p class="note">${escapeHtml(formatSnapshotSource(codexSnapshot))}</p>`
-    : `<p class="note">Automatic Codex usage was not available: ${escapeHtml(codexSnapshot?.error || 'No snapshot found')}. Manual counters are shown instead.</p>`;
+    : `<p class="note">${escapeHtml(codexSnapshot?.error || 'Refresh after Codex writes a usage snapshot.')}</p>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1082,17 +791,9 @@ function renderDashboard(webview, state, codexSnapshot, surface) {
       letter-spacing: 0;
     }
 
-    .subtitle {
-      margin: 0;
-      color: var(--text-dim);
-      max-width: 68ch;
-    }
-
     .actions {
       display: flex;
-      flex-wrap: wrap;
       justify-content: flex-end;
-      gap: var(--space-2);
     }
 
     .btn {
@@ -1135,27 +836,22 @@ function renderDashboard(webview, state, codexSnapshot, surface) {
       border-color: transparent;
     }
 
-    .grid {
+    .meters {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: var(--space-4);
-    }
-
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-md);
-      padding: var(--space-4);
-      display: grid;
-      gap: var(--space-4);
-      min-width: 0;
-    }
-
-    .metric-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
       gap: var(--space-3);
+    }
+
+    .meter {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+
+    .meter-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-2);
     }
 
     .label {
@@ -1199,12 +895,12 @@ function renderDashboard(webview, state, codexSnapshot, surface) {
 
     .bar {
       display: grid;
-      gap: var(--space-2);
+      gap: var(--space-1);
     }
 
     .track {
       width: 100%;
-      height: 12px;
+      height: 14px;
       overflow: hidden;
       border-radius: var(--radius-pill);
       background: var(--surface-2);
@@ -1222,83 +918,19 @@ function renderDashboard(webview, state, codexSnapshot, surface) {
     .fill.warning { background: var(--warning); }
     .fill.danger { background: var(--danger); }
 
-    .segments {
-      display: grid;
-      grid-template-columns: repeat(10, minmax(0, 1fr));
-      gap: var(--space-1);
-    }
-
-    .segment {
-      height: 28px;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--border);
-      background: var(--surface-2);
-    }
-
-    .segment-active {
-      background: var(--accent);
-      border-color: transparent;
-    }
-
-    .meta-row {
-      display: flex;
-      justify-content: space-between;
-      gap: var(--space-3);
-      color: var(--text-dim);
-      font-size: var(--text-sm);
-    }
-
-    .history {
-      display: grid;
-      gap: var(--space-3);
-    }
-
-    .history-list {
-      display: grid;
-      gap: var(--space-2);
-    }
-
-    .entry {
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      align-items: center;
-      gap: var(--space-3);
-      padding: var(--space-3);
-      border-radius: var(--radius-sm);
-      background: var(--surface-2);
-      border: 1px solid var(--border);
-    }
-
-    .entry-amount {
-      font-weight: var(--weight-semibold);
-    }
-
-    .entry-note {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--text-dim);
-    }
-
-    .entry-time {
-      color: var(--text-muted);
-      font-size: var(--text-xs);
-      white-space: nowrap;
-    }
-
-    .empty {
-      padding: var(--space-6);
-      border-radius: var(--radius-md);
-      border: 1px dashed var(--border);
-      color: var(--text-dim);
-      text-align: center;
-    }
-
     .note {
       color: var(--text-muted);
       font-size: var(--text-xs);
       max-width: 78ch;
+    }
+
+    .empty {
+      padding: var(--space-4);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      color: var(--text-dim);
+      background: var(--surface-2);
+      text-align: center;
     }
 
     @media (max-width: 760px) {
@@ -1314,13 +946,6 @@ function renderDashboard(webview, state, codexSnapshot, surface) {
         justify-content: flex-start;
       }
 
-      .grid {
-        grid-template-columns: 1fr;
-      }
-
-      .entry {
-        grid-template-columns: 1fr;
-      }
     }
 
     body.sidebar .shell {
@@ -1337,58 +962,18 @@ function renderDashboard(webview, state, codexSnapshot, surface) {
       font-size: var(--text-lg);
     }
 
-    body.sidebar .subtitle {
-      display: none;
-    }
-
     body.sidebar .actions {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      justify-content: stretch;
-      gap: var(--space-2);
-    }
-
-    body.sidebar .actions .btn:first-child {
-      grid-column: 1 / -1;
+      justify-content: flex-end;
     }
 
     body.sidebar .btn {
-      width: 100%;
       min-height: 34px;
       padding-inline: var(--space-2);
       font-size: var(--text-xs);
     }
 
-    body.sidebar .grid {
-      grid-template-columns: 1fr;
-      gap: var(--space-3);
-    }
-
-    body.sidebar .card {
-      padding: var(--space-3);
-      gap: var(--space-3);
-    }
-
-    body.sidebar .usage-value strong {
-      font-size: var(--text-lg);
-    }
-
-    body.sidebar .segment {
-      height: 20px;
-    }
-
-    body.sidebar .meta-row {
-      display: grid;
-      gap: var(--space-2);
-    }
-
-    body.sidebar .entry {
-      grid-template-columns: 1fr;
-      gap: var(--space-1);
-    }
-
-    body.sidebar .entry-time {
-      white-space: normal;
+    body.sidebar .meters {
+      gap: var(--space-4);
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1403,36 +988,14 @@ function renderDashboard(webview, state, codexSnapshot, surface) {
     <section class="topbar">
       <div class="title-block">
         <h1>Codex Usage</h1>
-        <p class="subtitle">${hasCodexSnapshot ? 'Codex-reported rate-limit windows from local session files.' : 'Local counters for monthly usage and the active 5-hour reset window.'}</p>
       </div>
       <div class="actions">
-        <button class="btn btn-primary" data-command="addUsage">Add usage</button>
-        <button class="btn" data-command="enableEndpoint">Enable endpoint</button>
-        <button class="btn" data-command="setLimits">Set limits</button>
         <button class="btn" data-command="refresh">Refresh</button>
       </div>
     </section>
 
-    <section class="grid" aria-label="Usage meters">
+    <section class="meters" aria-label="Usage meters">
       ${usageCardsHtml}
-    </section>
-
-    <section class="card history">
-      <div class="metric-head">
-        <span class="label">Recent entries</span>
-        <span class="badge">${latestEntries.length} shown</span>
-      </div>
-      ${latestEntries.length ? `
-        <div class="history-list">
-          ${latestEntries.map((entry) => `
-            <div class="entry">
-              <span class="entry-amount">+${formatUsage(entry.amount)}</span>
-              <span class="entry-note">${escapeHtml(entry.note || 'Codex session')}</span>
-              <span class="entry-time">${escapeHtml(formatDateTime(entry.timestamp))}</span>
-            </div>
-          `).join('')}
-        </div>
-      ` : '<div class="empty">No usage entries yet. Add usage after a Codex session to start the 5-hour window.</div>'}
     </section>
 
     ${sourceHtml}

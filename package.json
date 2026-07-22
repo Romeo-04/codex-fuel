@@ -1,8 +1,8 @@
 {
   "name": "codex-usage-dashboard",
   "displayName": "Codex Usage Dashboard",
-  "description": "Local monthly and 5-hour window usage visualization for Codex.",
-  "version": "0.4.0",
+  "description": "Read-only Codex usage bars for VS Code.",
+  "version": "0.6.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.92.0"
@@ -12,11 +12,7 @@
   ],
   "activationEvents": [
     "onView:codexUsageDashboard.sidebar",
-    "onCommand:codexUsageDashboard.open",
-    "onCommand:codexUsageDashboard.addUsage",
-    "onCommand:codexUsageDashboard.setLimits",
-    "onCommand:codexUsageDashboard.resetWindow",
-    "onCommand:codexUsageDashboard.resetMonth"
+    "onCommand:codexUsageDashboard.open"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -43,43 +39,11 @@
         "command": "codexUsageDashboard.open",
         "title": "Codex Usage: Open Dashboard",
         "category": "Codex Usage"
-      },
-      {
-        "command": "codexUsageDashboard.addUsage",
-        "title": "Codex Usage: Add Usage",
-        "category": "Codex Usage"
-      },
-      {
-        "command": "codexUsageDashboard.setLimits",
-        "title": "Codex Usage: Set Limits",
-        "category": "Codex Usage"
-      },
-      {
-        "command": "codexUsageDashboard.resetWindow",
-        "title": "Codex Usage: Reset 5-Hour Window",
-        "category": "Codex Usage"
-      },
-      {
-        "command": "codexUsageDashboard.resetMonth",
-        "title": "Codex Usage: Reset Monthly Usage",
-        "category": "Codex Usage"
       }
     ],
     "configuration": {
       "title": "Codex Usage Dashboard",
       "properties": {
-        "codexUsageDashboard.defaultMonthlyLimit": {
-          "type": "number",
-          "default": 100,
-          "minimum": 0,
-          "description": "Default monthly usage limit for the local Codex usage dashboard."
-        },
-        "codexUsageDashboard.defaultFiveHourLimit": {
-          "type": "number",
-          "default": 25,
-          "minimum": 0,
-          "description": "Default 5-hour usage limit for the local Codex usage dashboard."
-        },
         "codexUsageDashboard.autoReadCodexSessions": {
           "type": "boolean",
           "default": true,
@@ -91,14 +55,12 @@
           "enum": [
             "auto",
             "sessionFiles",
-            "endpoint",
-            "manual"
+            "endpoint"
           ],
           "enumDescriptions": [
-            "Try the authenticated endpoint when enabled, then session files, then manual counters.",
+            "Try the authenticated endpoint when enabled, then session files.",
             "Read local Codex session rollout files only.",
-            "Use the authenticated usage endpoint only. Requires experimentalReadAuthJson.",
-            "Use local manual counters only."
+            "Use the authenticated usage endpoint only. Requires experimentalReadAuthJson."
           ],
           "description": "Usage data source for the dashboard."
         },
