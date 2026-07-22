@@ -2,7 +2,7 @@
   "name": "codex-usage-dashboard",
   "displayName": "Codex Fuel",
   "description": "Read-only Codex usage bars for VS Code.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "local",
   "engines": {
     "vscode": "^1.92.0"
@@ -48,7 +48,15 @@
         "icon": "$(refresh)"
       }
     ],
-
+    "menus": {
+      "view/title": [
+        {
+          "command": "codexUsageDashboard.refresh",
+          "when": "view == codexUsageDashboard.sidebar",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Codex Fuel",
       "properties": {

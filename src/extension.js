@@ -577,16 +577,18 @@ function pickDisplayWindows(windows) {
     return [];
   }
 
-  const fiveHour = windows.find((window) => window.windowMinutes === 300);
-  const shortWindow = fiveHour || windows[0];
-  const monthlyWindow = windows.find((window) => window.windowMinutes >= 40320 && window.windowMinutes <= 44640);
-  const longWindow = monthlyWindow || windows[windows.length - 1];
+  const selected = [];
+  const addWindow = (window) => {
+    if (window && !selected.some((item) => item === window || item.id === window.id || item.windowMinutes === window.windowMinutes)) {
+      selected.push(window);
+    }
+  };
 
-  if (shortWindow === longWindow) {
-    return [shortWindow];
-  }
+  addWindow(windows.find((window) => window.windowMinutes === 300) || windows[0]);
+  addWindow(windows.find((window) => window.windowMinutes === 1440));
+  addWindow(windows.find((window) => window.windowMinutes >= 40320 && window.windowMinutes <= 44640) || windows[windows.length - 1]);
 
-  return [shortWindow, longWindow];
+  return selected;
 }
 
 function getNonce() {
@@ -629,7 +631,7 @@ function renderCodexUsageBars(snapshot) {
           <span class="label">${escapeHtml(window.label)}</span>
           <span class="badge ${status}">${percent}%</span>
         </div>
-        <div class="bar" data-tooltip="${escapeHtml(tooltip)}" title="${escapeHtml(resetText)}">
+        <div class="bar" data-tooltip="${escapeHtml(tooltip)}" tabindex="0" aria-label="${escapeHtml(tooltip)}">
           <div class="track" aria-label="${escapeHtml(window.label)} usage progress">
             <div class="fill ${status}" style="--progress: ${window.usedPercent}%"></div>
           </div>
@@ -741,7 +743,15 @@ function renderDashboard(webview, codexSnapshot, surface) {
 
     * { box-sizing: border-box; }
 
+    html,
     body {
+      min-height: 100%;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
       margin: 0;
       background: var(--bg);
       color: var(--text);
@@ -831,7 +841,8 @@ function renderDashboard(webview, codexSnapshot, surface) {
       content: attr(data-tooltip);
       position: absolute;
       left: 0;
-      bottom: calc(100% + var(--space-2));
+      top: calc(100% + var(--space-2));
+      bottom: auto;
       z-index: 1;
       width: max-content;
       max-width: min(280px, 90cqi);
@@ -846,14 +857,27 @@ function renderDashboard(webview, codexSnapshot, surface) {
       white-space: pre-line;
       opacity: 0;
       pointer-events: none;
-      transform: translateY(var(--space-1));
+      transform: translateY(calc(-1 * var(--space-1)));
       transition: opacity 140ms ease-out, transform 140ms ease-out;
     }
 
+    .meter + .meter .bar::after {
+      top: auto;
+      bottom: calc(100% + var(--space-2));
+      transform: translateY(var(--space-1));
+    }
+
     .bar:hover::after,
+    .bar:focus::after,
     .bar:focus-within::after {
       opacity: 1;
       transform: translateY(0);
+    }
+
+    .bar:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: var(--space-1);
+      border-radius: var(--radius-sm);
     }
 
     .track {
@@ -936,6 +960,7 @@ function renderDashboard(webview, codexSnapshot, surface) {
 
     ${sourceHtml}
   </main>
+
 
 
 </body>

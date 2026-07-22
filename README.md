@@ -10,7 +10,7 @@ This extension does not read Codex credentials, account data, billing data, or p
 
 ## Sidebar
 
-After installation, VS Code adds a **Codex Fuel** icon to the Activity Bar. The sidebar shows two simple bars: the short reset window and the long/monthly window. Hover over a bar to see reset timing and window details.
+After installation, VS Code adds a **Codex Fuel** icon to the Activity Bar. The sidebar shows the key reported usage windows, including daily usage when Codex reports it. Hover over a bar to see reset timing and window details.
 
 ## Automatic Codex Usage
 
